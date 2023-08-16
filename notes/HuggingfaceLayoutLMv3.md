@@ -54,7 +54,7 @@ boxes = example["bboxes"]
 
 - `LayoutLMv3Tokenizer`: 实例化的时候需要提供`vocab_file` 和`merges_file`. 实际中可以`from_pretrained`加载预训练模型对应的文件, 实际上打开此前的`./model`目录, 可以看到其中有`merges.txt`以及`vocab.json`文件. 调用实例化对象时实际上是较为复杂的, 分成`text`输入和`text_pair`输入. 这里所谓的`text_pair`是指做完token后的文本. 这里我们只考虑`text`的情况, 对于每一个输入的string, 都需要给定一个box
 
-- `LayoutLMv3Processor`: 可以理解为总的处理模块, 实例化后既可以处理文本也可以处理图像, 这里需要注意的是, 其可以i添加NER模态, 即命名实体识别
+- `LayoutLMv3Processor`: 可以理解为总的处理模块, 实例化后既可以处理文本也可以处理图像, 这里需要注意的是, 其可以i添加NER模态, 即命名实体识别. 在介绍中, 其表明了这个模块提供了所有模型输入需要的东西
 
 对于上述操作, 这里抽象了一个总的类可以看看
 
@@ -103,4 +103,130 @@ if __name__ == "__main__":
     print(textProcRet)
 ```
 
-为什么没有最后一个处理? 因为在文档中有相应操作且比较详细, 有时间再来补.
+为什么没有最后一个样列? 因为实际上最后一个样列就是提供给前两个样列所需要的数据, 然后将各自处理好的数据整合返回, 因此在这写比较繁琐. 需要注意的是, 使用时同样可以输入`apply_ocr`参数, 倘若设置了使用OCR, 则无需输入额外的文本及其标注框.
+
+## 模型使用
+
+所有的预训练模型使用都大同小异, 关键在于掌握实例化后的输入以及输出. 模型有直接输出hidden states的, 也有用于下游任务的. 这里只介绍模型使用
+
+```python
+from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3Processor
+from datasets import load_from_disk
+
+
+class ModelUse:
+    def __init__(self, modelPath="./model", datasetPath="./dataset"):
+        self.modelPath = modelPath
+        self.data = load_from_disk(datasetPath)
+        self.proc = LayoutLMv3Processor.from_pretrained(
+            modelPath, apply_ocr=False)
+
+        self.config = LayoutLMv3Config
+
+    def dataShow(self):
+        for k in self.data.keys():
+            print(k)
+            cnt = 0
+            for data in self.data[k]:
+                print(data)
+                cnt += 1
+                if cnt >= 3:
+                    break
+
+    def hiddenState(self):
+        data = self.data["train"][:2]
+        dataFormatted = {
+            "images": data["image"],
+            "text": data["tokens"],
+            "boxes": data["bboxes"],
+            "padding": "max_length",
+            "max_length": 512,
+            "truncation": True,
+            "return_tensors": "pt"
+        }
+        dataProced = self.proc(**dataFormatted)
+        model = LayoutLMv3Model.from_pretrained(self.modelPath)
+        return model(**dataProced, output_hidden_states=True, output_attentions=True)
+
+
+if __name__ == "__main__":
+    mu = ModelUse()
+    mu.dataShow()
+    mu.hiddenState()
+```
+
+这里注意huggingface比较喜欢的传参方式, 使用字典.
+
+## 实战: 在FUNSD上微调LayoutLMv3
+
+官方写了一个非常详细 (甚至过于详细) 的微调版本[代码](https://github.com/huggingface/transformers/blob/main/examples/research_projects/layoutlmv3/run_funsd_cord.py). 包括各种版本检查, 参数输入等, 也提供了funetune完成后的权重. 我们这里自己写着用倒不用整那么多没用的, 参考main函数写就行了.
+
+在写之前需要了解一下FUNSD (Form Understanding in Noisy Scanned Documents) . 看名字其实基本内容已经很清楚了, 这是个用于在噪声扫描情况下对表单的标注数据集. 表单中的内容主要是一些NER标注, 可视化一下就如下
+
+![](https://guillaumejaume.github.io/FUNSD/img/two_forms.png)
+
+比如这里蓝色部分代表表单问题, 绿色代表用户填写的信息, 橙色代表标题, 紫色代表一些其他信息 (纯属瞎猜) . 总之, 反映在具体的数据集上, 会有文本的bounding box坐标, 文本对应的token, 文本对应类别标签.
+
+因此, 使用FUNSD来微调, 只能是针对NER类别标签进行token classification的任务. 幸运的是, huggingface提供了用于token classification的模型, 加载这个模型并加载预训练模型的权重, 则可以基于FUNSD来微调token classification模型. 如下
+
+```python
+import torch
+from torch.utils.data import DataLoader
+from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3Processor, LayoutLMv3ForTokenClassification
+from datasets import load_from_disk
+from gpuGrab import GPUGrab
+
+
+class FinetuneFUNSD:
+    def __init__(self, modelPath="./model", datasetPath="./dataset", device="cuda"):
+        """
+        For the pretrained model, we do not change any configurations.
+        """
+        device = device.lower()
+        if device == "cuda":
+            gg = GPUGrab()
+            self.device = f"{device}:{gg.autoCheck()[0]}"
+
+        config = LayoutLMv3Config()  # use default configuration
+        self.model = LayoutLMv3ForTokenClassification(
+            config).from_pretrained(modelPath, num_labels=7).to(device)
+        self.dataset = load_from_disk(datasetPath)
+        self.proc = LayoutLMv3Processor.from_pretrained(
+            modelPath, apply_ocr=False)
+
+    def finnetune(self, epoch=16, batchSize=4):
+        trainData = self.dataset["train"].map(lambda e: self.proc(
+            e['image'], e['tokens'], boxes=e['bboxes'], word_labels=e['ner_tags'], padding="max_length", max_length=512, truncation=True), batched=True)
+
+        print(trainData.features)
+        trainData.set_format(type='torch', columns=[
+                             "input_ids", "attention_mask", "bbox", "pixel_values", "labels"])
+
+        # attention, every element should be the same size
+        trainLoader = DataLoader(
+            dataset=trainData, shuffle=True, drop_last=True, batch_size=batchSize)
+
+        # optim
+        optm = torch.optim.AdamW(self.model.parameters(), lr=2e-5)
+
+        for e in range(epoch):
+            print(e)
+            for x in trainLoader:
+                for k in x.keys():
+                    x[k] = x[k].to(self.device)
+
+                out = self.model(**x, output_hidden_states=False,
+                                 output_attentions=False)
+                optm.zero_grad()
+                print(out.loss)
+                out.loss.backward()
+                optm.step()
+        self.model.save_pretrained("./finetuned")
+
+
+if __name__ == "__main__":
+    ft = FinetuneFUNSD()
+    ft.finnetune()
+```
+
+上面的`.map`命令要掌握, 因为从Dataset类中的原始数据很可能只是基础的数据类型, 需要转成tensor. 会使用`lambda`指令来定义简易函数. 看样例应该很好理解, 就不多解释了. 同时, `set_format`可以过滤出需要的栏目来. 因为前面的处理后原始数据也会给一个dict对应的key和value予以保留, 我们后面使用`**`符号传参不能传入未定义的变量, 因此需要取出必要的. 而后的训练则和pytorch一致了, 最后, 要模型保存也挺方便的, 用`.save_pretrained`保存到目录中即可, 加载也是从该目录加载.
