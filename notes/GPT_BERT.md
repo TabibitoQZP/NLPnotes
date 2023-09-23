@@ -52,11 +52,11 @@ $$
 
 $$
 \left(\begin{array}{ccccc} 
-0 & -inf & -inf & -inf & -inf\\
-0 & 0 & -inf & -inf & -inf\\
-0 & 0 & -inf & -inf & -inf\\
-0 & 0 & 0 & -inf & -inf\\
-0 & 0 & 0 & 0 & -inf
+0 & -\infin & -\infin & -\infin & -\infin\\
+0 & 0 & -\infin & -\infin & -\infin\\
+0 & 0 & 0 & -\infin & -\infin\\
+0 & 0 & 0 & 0 & -\infin\\
+0 & 0 & 0 & 0 & 0
 \end{array}\right)
 $$
 
