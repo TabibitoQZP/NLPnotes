@@ -1,5 +1,3 @@
-### INFERENCE ADAPTED DENSE TRANSFORMER MODELS
-
 # High Throughput Scenario
 
 ## FlexGen

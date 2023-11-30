@@ -17,3 +17,9 @@
 ### 其他
 
 还涉及到诸如pipeline并行之类的操作, 顺便pipeline并行对mini batch有所要求.
+
+## Alpha-Serve
+
+### Intra, Inter
+
+并行的策略有intra-
